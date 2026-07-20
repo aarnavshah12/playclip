@@ -44,6 +44,11 @@ class SportConfig:
     w_possession: float = 0.35
     w_touch: float = 0.35
     w_sprint: float = 0.25
+    # player-agnostic goal-chance fallback: distances in units of the detected
+    # goal bbox height (youth goal ~2 m — same visual scale as a player)
+    goal_chance_dist: float = 2.0        # full weight inside this
+    goal_chance_far_dist: float = 4.0    # zero beyond this
+    goal_chance_speed: float = 3.0       # ball speed (goal-heights/s) = shot bonus
 
 
 @dataclass(frozen=True)
@@ -71,6 +76,11 @@ class ReelcutConfig:
     link_max_gap_s: float = 3.0         # max gap to kinematically link tracklets
     link_max_dist: float = 3.0          # player-heights at gap=0, scaled by gap
     identity_floor: float = 0.25        # min confidence to keep TARGET claims
+
+    # goal-chance fallback: when the target is lost (off-screen, no OCR, bad
+    # tracking), player-agnostic goal-mouth action still makes the reel.
+    fallback_enabled: bool = True
+    fallback_weight: float = 0.85       # opportunity score vs target involvement
 
     # involvement
     smooth_window_s: float = 2.0

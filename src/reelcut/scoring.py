@@ -314,6 +314,110 @@ def score_timeline(
     return points
 
 
+def score_opportunities(
+    frames: list[FrameObservation], cfg: ReelcutConfig
+) -> list[ScorePoint]:
+    """Player-agnostic goal-chance score per frame timestamp, tag "goal_chance".
+
+    Needs a ball (interpolated counts, confidence-scaled) and at least one
+    detected goal box. Distance = ball center to the nearest edge of the
+    closest goal bbox, in units of that goal's bbox height: full weight inside
+    ``sport.goal_chance_dist``, linear falloff to zero at
+    ``sport.goal_chance_far_dist``. A ball moving faster than
+    ``sport.goal_chance_speed`` goal-heights/s while in range adds a shot
+    bonus (+0.3, clamped to 1). Identity plays no part — this is the fallback
+    that keeps reels alive when the target kid is lost.
+    """
+    sport = cfg.sport
+    n_f = len(frames)
+    frame_ts = [f.timestamp_s for f in frames]
+
+    centers = [
+        (f.ball.bbox.cx, f.ball.bbox.cy) if f.ball is not None else None
+        for f in frames
+    ]
+    speeds: list[float | None] = [None] * n_f
+    for i in range(1, n_f):
+        c0, c1 = centers[i - 1], centers[i]
+        dt = frame_ts[i] - frame_ts[i - 1]
+        if c0 is not None and c1 is not None and dt > 0:
+            speeds[i] = math.hypot(c1[0] - c0[0], c1[1] - c0[1]) / dt
+
+    points: list[ScorePoint] = []
+    for i, frame in enumerate(frames):
+        ball = frame.ball
+        if ball is None or not frame.goal_boxes:
+            points.append(ScorePoint(frame_ts[i], 0.0, ()))
+            continue
+        bx, by = ball.bbox.cx, ball.bbox.cy
+        best = None  # (normalized distance, goal height)
+        for goal in frame.goal_boxes:
+            gh = max(goal.h, 1.0)
+            dx = max(goal.x - bx, 0.0, bx - goal.x2)
+            dy = max(goal.y - by, 0.0, by - goal.y2)
+            d = math.hypot(dx, dy) / gh
+            if best is None or d < best[0]:
+                best = (d, gh)
+        d, gh = best
+        if d <= sport.goal_chance_dist:
+            score = 1.0
+        elif d >= sport.goal_chance_far_dist:
+            score = 0.0
+        else:
+            span = sport.goal_chance_far_dist - sport.goal_chance_dist
+            score = 1.0 - (d - sport.goal_chance_dist) / span
+        if score <= 0.0:
+            points.append(ScorePoint(frame_ts[i], 0.0, ()))
+            continue
+        speed = speeds[i]
+        if speed is not None and speed / gh > sport.goal_chance_speed:
+            score = min(1.0, score + 0.3)
+        # interpolated/low-confidence balls count for less
+        conf = ball.confidence if not ball.interpolated else ball.confidence * 0.7
+        score *= max(0.3, min(1.0, conf + 0.4))
+        points.append(ScorePoint(frame_ts[i], min(1.0, score), ("goal_chance",)))
+    return points
+
+
+def blend_scores(
+    primary: list[ScorePoint], fallback: list[ScorePoint], weight: float
+) -> list[ScorePoint]:
+    """Pointwise max of the target-involvement score and ``weight`` x the
+    player-agnostic fallback, matched by timestamp (nearest within half the
+    primary sample period; unmatched fallback points are ignored). Tags union
+    whenever the fallback meaningfully contributes (> 0.05 weighted)."""
+    if not fallback:
+        return list(primary)
+    if not primary:
+        return [
+            ScorePoint(p.timestamp_s, min(1.0, p.score * weight), p.tags)
+            for p in fallback
+        ]
+    fb_ts = [p.timestamp_s for p in fallback]
+    period = _sample_period([p.timestamp_s for p in primary])
+    tol = (period / 2.0 + _EPS) if period else _EPS
+    out: list[ScorePoint] = []
+    for p in primary:
+        k = bisect_left(fb_ts, p.timestamp_s)
+        match: ScorePoint | None = None
+        for j in (k - 1, k):
+            if 0 <= j < len(fallback) and (
+                match is None
+                or abs(fb_ts[j] - p.timestamp_s) < abs(match.timestamp_s - p.timestamp_s)
+            ):
+                match = fallback[j]
+        if match is None or abs(match.timestamp_s - p.timestamp_s) > tol:
+            out.append(p)
+            continue
+        weighted = min(1.0, match.score * weight)
+        if weighted <= 0.05:
+            out.append(p)
+        else:
+            tags = tuple(sorted(set(p.tags) | set(match.tags)))
+            out.append(ScorePoint(p.timestamp_s, max(p.score, weighted), tags))
+    return out
+
+
 def smooth_scores(
     points: list[ScorePoint], window_s: float
 ) -> list[ScorePoint]:

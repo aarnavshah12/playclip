@@ -103,6 +103,7 @@ class FrameObservation:
     players: tuple[PlayerObs, ...] = ()
     ball: BallObs | None = None
     ocr: tuple[OcrRead, ...] = ()
+    goal_boxes: tuple[BBox, ...] = ()   # detected goal frames (class `goal`)
 
 
 # --------------------------------------------------------------------------- #
@@ -265,6 +266,7 @@ _TUPLE_FIELDS = {
     ("PlayerObs", "velocity"), ("PlayerObs", "torso_hsv"),
     ("TrackletPoint", "torso_hsv"),
     ("FrameObservation", "players"), ("FrameObservation", "ocr"),
+    ("FrameObservation", "goal_boxes"),
     ("ScorePoint", "tags"), ("InvolvementEvent", "tags"), ("Clip", "reasons"),
 }
 

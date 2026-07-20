@@ -30,17 +30,30 @@ from .types import BallObs, BBox, FrameObservation, OcrRead, PlayerObs
 logger = logging.getLogger(__name__)
 
 
-def _shim_torch_mps() -> None:
-    """torch 2.13 removed torch.mps.current_device, but inference_models'
-    ONNX preprocess enters a torch.cuda.stream() context whose generalized
-    accelerator lookup still calls it on Apple Silicon. Restore the attribute
-    so local in-process inference works on Macs."""
+def _prepare_inference_env() -> None:
+    """Must run BEFORE the first `import inference`.
+
+    * With max_fps on a video FILE, inference's default is to throttle
+      wall-clock to max_fps while still processing EVERY frame (measured:
+      45 s clip -> 280 s). This flag makes it drop frames instead, which is
+      what sampling means for post-hoc batch work.
+    * torch 2.13 removed torch.mps.current_device, but inference_models'
+      ONNX preprocess enters a torch.cuda.stream() context whose generalized
+      accelerator lookup still calls it on Apple Silicon; restore it.
+    """
+    import os
+
+    os.environ.setdefault("ENABLE_FRAME_DROP_ON_VIDEO_FILE_RATE_LIMITING", "True")
     try:
         import torch
     except ImportError:
         return
     if not hasattr(torch.mps, "current_device"):
         torch.mps.current_device = lambda: 0
+
+
+# Back-compat alias (scripts import the old name).
+_shim_torch_mps = _prepare_inference_env
 
 # Histogram binning shared with stitching.team_color_reference:
 # HSV, H in 12 bins x S in 4 bins (V dropped for lighting robustness),
@@ -266,6 +279,11 @@ class StubWorkflowClient:
                 players=players,
                 ball=ball,
                 ocr=tuple(ocr),
+                goal_boxes=(
+                    # static goal mouths at both touchlines (fallback fodder)
+                    BBox(0.0, frame_h * 0.40, frame_w * 0.03, frame_h * 0.20),
+                    BBox(frame_w * 0.97, frame_h * 0.40, frame_w * 0.03, frame_h * 0.20),
+                ),
             )
 
 
@@ -396,6 +414,12 @@ def _observation_from_prediction(
             confidence=_float_at(ball_conf, k) or 0.0,
         )
 
+    goal_boxes: list[BBox] = []
+    goal_det = predictions.get("goal_detections")
+    for k in range(_detections_len(goal_det)):
+        gx = np.asarray(goal_det.xyxy, dtype=float).reshape(-1, 4)[k]
+        goal_boxes.append(BBox.from_xyxy(*(float(v) for v in gx)))
+
     return FrameObservation(
         frame_index=int(frame_index),
         timestamp_s=float(timestamp_s),
@@ -404,6 +428,7 @@ def _observation_from_prediction(
         players=tuple(players),
         ball=ball,
         ocr=tuple(ocr),
+        goal_boxes=tuple(goal_boxes),
     )
 
 
@@ -440,7 +465,7 @@ class RoboflowWorkflowClient:
         FrameObservation (computing torso_histogram locally per player), and
         yield in order. Blocks until the video is exhausted."""
         # Heavy import kept local so importing this module stays cheap/offline.
-        _shim_torch_mps()
+        _prepare_inference_env()
         from inference import InferencePipeline
 
         meta = probe(video)
