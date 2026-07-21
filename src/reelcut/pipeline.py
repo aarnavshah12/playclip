@@ -174,6 +174,31 @@ def run_pipeline(
             )
             raise SystemExit(1)
         labeled = stitching.label_tracklets(tracklets, spec, frames, cfg)
+        if (
+            cfg.reid_enabled
+            and video.exists()
+            and not isinstance(client, StubWorkflowClient)
+            and os.environ.get("ROBOFLOW_API_KEY")
+        ):
+            from . import reid
+
+            embedder = reid.make_clip_embedder(os.environ["ROBOFLOW_API_KEY"])
+            embeds = reid.track_embeddings(
+                tracklets, seed_track, video, embedder, cfg
+            )
+            negatives = reid.negative_track_ids(
+                tracklets, spec.jersey, cfg.reid_neg_min_reads
+            )
+            scores = reid.contrastive_scores(embeds, seed_track, negatives)
+            before = {lt.tracklet.track_id: lt.label for lt in labeled}
+            labeled = reid.apply_reid(labeled, scores, seed_track, cfg)
+            n_changed = sum(
+                1 for lt in labeled
+                if before[lt.tracklet.track_id] is not lt.label
+            )
+            _health(2, "reid",
+                    f"{len(embeds)} tracks embedded vs {len(negatives)} "
+                    f"negative banks, {n_changed} labels changed")
         labeled = stitching.chain_target_tracklets(labeled, cfg)
         identity = stitching.identity_timeline(labeled, frames, cfg)
         cache.save(2, "identity", {

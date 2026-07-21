@@ -90,6 +90,26 @@ class ReelcutConfig:
                                         # last-read number per track
                                         # (False = old stop-at-lock economy mode)
     ocr_neg_votes: int = 2              # confident different-number reads to call NOT_TARGET
+
+    # appearance re-ID: CLIP embeddings of player crops vs a reference bank
+    # harvested from the seed click's tracklet. DISABLED by default: measured
+    # on the CSKA fixture (scripts/calibrate_reid.py), full-crop CLIP cannot
+    # separate same-team kids — true-target tracks scored contrast +0.015 to
+    # -0.004 while junk tracks hit +0.061. Track-level jersey-read dominance
+    # is the working identity backbone; revisit re-ID with a torso-crop or
+    # dedicated person-reID embedder.
+    reid_enabled: bool = False
+    reid_ref_samples: int = 16          # crops harvested from the seed track
+    reid_samples_per_track: int = 6     # crops embedded per candidate track
+    reid_min_crop_h: int = 80           # px; smaller crops embed unreliably
+    # Scoring is CONTRASTIVE (seed bank vs banks of tracks whose dominant
+    # jersey read is a different number): absolute CLIP sims are useless on
+    # player crops — measured 0.88-0.95 for EVERY kid on the CSKA fixture,
+    # kit + grass dominate. See scripts/calibrate_reid.py.
+    reid_min_sim: float = 0.90          # floor on sim-to-seed for any claim
+    reid_contrast_margin: float = 0.02  # required (sim_seed - sim_negatives)
+    reid_neg_min_reads: int = 30        # reads needed to trust a track as a
+                                        # negative reference
     color_veto_dist: float = 0.75       # histogram distance beyond which team color vetoes
     max_plausible_speed: float = 8.0    # player-heights/s; faster linking = implausible
     link_max_gap_s: float = 3.0         # max gap to kinematically link tracklets
