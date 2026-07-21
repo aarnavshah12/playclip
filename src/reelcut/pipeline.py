@@ -310,8 +310,15 @@ def run_pipeline(
             if goal_evts:
                 n_found = len(goal_evts)
                 if cfg.max_goal_clips > 0 and len(goal_evts) > cfg.max_goal_clips:
+                    # Rank by cluster DURATION, then peak: after a real goal
+                    # the ball STAYS at the net (celebration, fetching it
+                    # out), so goal clusters run long; saved shots bounce
+                    # away and cluster short. Peaks saturate (a great save
+                    # and a goal both max the score) and cannot discriminate.
                     goal_evts = sorted(
-                        sorted(goal_evts, key=lambda e: e.peak_score,
+                        sorted(goal_evts,
+                               key=lambda e: (e.end_s - e.start_s,
+                                              e.peak_score),
                                reverse=True)[: cfg.max_goal_clips],
                         key=lambda e: e.start_s,
                     )
