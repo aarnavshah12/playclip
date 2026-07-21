@@ -183,6 +183,18 @@ def test_continuous_reads_stop_after_enrollment(tiny_video):
     assert reader.calls == 16               # t=0.0 .. t=3.0 inclusive, then locked
 
 
+def test_enrollment_clock_starts_at_first_successful_read(tiny_video):
+    """User-specified: a player whose jersey is hidden at first keeps getting
+    attempts every frame; THEIR 3 seconds start when the jersey first shows."""
+    reader = CountingReader([None] * 20 + [("7", 0.9)])
+    frames = track_frames(n=45)             # 8.8s of track life at 5 fps
+    _, bound = bind_numbers(frames, tiny_video, CONT, reader)
+    assert bound == {5: "7"}
+    # 20 failed attempts (t=0..3.8) + reads from first success at t=4.0
+    # until t=7.0 closes the window -> samples i=0..35 all attempted
+    assert reader.calls == 36
+
+
 def test_concatenation_never_hijacks_majority():
     """The measured '#71 on the 7 kid' bug: one fused read must not out-rank
     a track full of clean reads of the real number."""
