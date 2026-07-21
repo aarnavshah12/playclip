@@ -67,6 +67,13 @@ class ReelcutConfig:
     ball_classes: tuple[str, ...] = ("ball",)
     min_player_box_h_frac: float = 0.02         # drop boxes shorter than 2% of frame height
 
+    # stage 1.5: jersey-number binding — read-until-bound, then the tracker
+    # carries the number; a dead track's successor repeats the process.
+    digit_model_id: str = "jersey-number-detection-8a55j-ob8fb/1"
+    number_attempt_hz: float = 1.0      # attempts per second of unbound track life
+    number_max_attempts: int = 8        # hard cap per tracklet
+    digit_min_conf: float = 0.35
+
     # identity stitching
     ocr_pos_confidence: float = 0.4     # OCR conf needed to count a jersey read
     ocr_pos_votes: int = 1              # matching reads to call tracklet TARGET

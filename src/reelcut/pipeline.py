@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from . import clipcutter, ffmpeg, scoring, stitching
@@ -130,6 +131,32 @@ def run_pipeline(
     # Stage 2 — identity
     # ------------------------------------------------------------------ #
     if not cache.has(2, "identity"):
+        # Stage 1.5: read-until-bound jersey numbers (skipped for the stub,
+        # which synthesizes its own reads, and when no video/model/key exists).
+        number_reads: list[tuple[int, object]] = []
+        if (
+            cfg.digit_model_id
+            and video.exists()
+            and not isinstance(client, StubWorkflowClient)
+            and os.environ.get("ROBOFLOW_API_KEY")
+        ):
+            from . import numbers
+
+            reader = numbers.make_digit_reader(
+                cfg.digit_model_id,
+                os.environ["ROBOFLOW_API_KEY"],
+                cfg.digit_min_conf,
+            )
+            enriched, bound = numbers.bind_numbers(frames, video, cfg, reader)
+            number_reads = [
+                (f.frame_index, r)
+                for f, orig in zip(enriched, frames)
+                for r in f.ocr[len(orig.ocr):]
+            ]
+            frames = enriched
+            _health(2, "numbers",
+                    f"{len(bound)} tracks bound to numbers "
+                    f"({len(number_reads)} fresh reads)")
         tracklets = stitching.build_tracklets(frames)
         seed_track = stitching.find_seed_tracklet(tracklets, spec, frames)
         if seed_track is None:
@@ -146,12 +173,26 @@ def run_pipeline(
         labeled = stitching.label_tracklets(tracklets, spec, frames, cfg)
         labeled = stitching.chain_target_tracklets(labeled, cfg)
         identity = stitching.identity_timeline(labeled, frames, cfg)
-        cache.save(2, "identity", {"labeled": labeled, "timeline": identity})
+        cache.save(2, "identity", {
+            "labeled": labeled,
+            "timeline": identity,
+            "number_reads": [[fi, r] for fi, r in number_reads],
+        })
         cache.save(2, "fingerprint", fingerprint)
     else:
         payload = cache.load(2, "identity")
         labeled = payload["labeled"]
         identity = payload["timeline"]
+        stored_reads = payload.get("number_reads") or []
+        if stored_reads:
+            by_index: dict[int, list] = {}
+            for fi, r in stored_reads:
+                by_index.setdefault(int(fi), []).append(r)
+            frames = [
+                replace(f, ocr=f.ocr + tuple(by_index[f.frame_index]))
+                if f.frame_index in by_index else f
+                for f in frames
+            ]
 
     n_target = sum(1 for t in labeled if t.label is IdentityLabel.TARGET)
     n_not = sum(1 for t in labeled if t.label is IdentityLabel.NOT_TARGET)
