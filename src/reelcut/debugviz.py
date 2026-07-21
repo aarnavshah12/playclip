@@ -43,11 +43,31 @@ def _put_text(
     cv2.putText(img, text, org, _FONT, scale, color, thickness, cv2.LINE_AA)
 
 
-def _draw_players(img: np.ndarray, fo: FrameObservation) -> None:
+def _jersey_numbers(frames: list[FrameObservation]) -> dict[int, str]:
+    """track_id -> jersey number, bound only when every read on the track
+    agrees (mirrors the identity layer's conflict guard)."""
+    seen: dict[int, set[str]] = {}
+    for fo in frames:
+        for read in fo.ocr:
+            digits = "".join(c for c in read.text if c.isdigit())
+            if digits:
+                seen.setdefault(read.track_id, set()).add(digits)
+    return {tid: nums.pop() for tid, nums in seen.items() if len(nums) == 1}
+
+
+def _draw_players(
+    img: np.ndarray, fo: FrameObservation, numbers: dict[int, str]
+) -> None:
     for p in fo.players:
         b = p.bbox
-        cv2.rectangle(img, (int(b.x), int(b.y)), (int(b.x2), int(b.y2)), _GRAY_BGR, 1)
-        _put_text(img, str(p.track_id), (int(b.x), max(12, int(b.y) - 4)), _GRAY_BGR, 0.4)
+        number = numbers.get(p.track_id)
+        if number is not None:
+            # known jersey number: the label a parent actually understands
+            cv2.rectangle(img, (int(b.x), int(b.y)), (int(b.x2), int(b.y2)), _WHITE_BGR, 2)
+            _put_text(img, f"#{number}", (int(b.x), max(14, int(b.y) - 4)), _WHITE_BGR, 0.55, 2)
+        else:
+            cv2.rectangle(img, (int(b.x), int(b.y)), (int(b.x2), int(b.y2)), _GRAY_BGR, 1)
+            _put_text(img, str(p.track_id), (int(b.x), max(12, int(b.y) - 4)), _GRAY_BGR, 0.4)
 
 
 def _draw_ball(img: np.ndarray, fo: FrameObservation) -> None:
@@ -106,9 +126,11 @@ def render_debug_video(
     scores: list[ScorePoint] | None,
     cfg: ReelcutConfig,
 ) -> None:
-    """Seek through the source with cv2.VideoCapture, draw overlays for each
-    cached FrameObservation, write with cv2.VideoWriter (mp4v). Missing
-    scores (None) -> render identity info only."""
+    """Sequentially decode EVERY source frame, drawing the most recent sampled
+    observation on each (hold-last), so the output plays at the source frame
+    rate with annotations updating at the sampling rate. Players with a
+    cleanly-read jersey number are labeled "#<number>"; others show their
+    track id. Missing scores (None) -> identity info only."""
     if not frames:
         return
     cap = cv2.VideoCapture(str(video))
@@ -116,34 +138,42 @@ def render_debug_video(
         cap.release()
         raise ValueError(f"cannot open video for debug render: {video}")
 
+    src_fps = float(cap.get(cv2.CAP_PROP_FPS)) or cfg.sample_fps
     w, h = frames[0].frame_w, frames[0].frame_h
     out_path.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
-        str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), cfg.sample_fps, (w, h)
+        str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), src_fps, (w, h)
     )
     if not writer.isOpened():
         cap.release()
         raise ValueError(f"cannot open debug video writer: {out_path}")
 
     have_scores = scores is not None
+    numbers = _jersey_numbers(frames)
     id_by_ts = {_ts_key(p.timestamp_s): p for p in identity}
     score_by_ts = {_ts_key(p.timestamp_s): p for p in (scores or [])}
 
     try:
-        for fo in frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, fo.frame_index)
+        fi = 0
+        src_idx = 0
+        while True:
             ok, img = cap.read()
             if not ok or img is None:
-                continue   # unreadable frame: skip gracefully
+                break
             if img.shape[1] != w or img.shape[0] != h:
                 img = cv2.resize(img, (w, h))
-            ip = id_by_ts.get(_ts_key(fo.timestamp_s))
-            sp = score_by_ts.get(_ts_key(fo.timestamp_s))
-            _draw_players(img, fo)
-            _draw_ball(img, fo)
-            _draw_target(img, ip)
-            _draw_hud(img, fo, ip, sp, have_scores)
+            while fi + 1 < len(frames) and frames[fi + 1].frame_index <= src_idx:
+                fi += 1
+            fo = frames[fi]
+            if fo.frame_index <= src_idx:   # first sample may start later
+                ip = id_by_ts.get(_ts_key(fo.timestamp_s))
+                sp = score_by_ts.get(_ts_key(fo.timestamp_s))
+                _draw_players(img, fo, numbers)
+                _draw_ball(img, fo)
+                _draw_target(img, ip)
+                _draw_hud(img, fo, ip, sp, have_scores)
             writer.write(img)
+            src_idx += 1
     finally:
         cap.release()
         writer.release()
