@@ -88,15 +88,22 @@ def _tween_identity(ip: IdentityPoint | None, ip_next: IdentityPoint | None, t: 
 
 
 def _jersey_numbers(frames: list[FrameObservation]) -> dict[int, str]:
-    """track_id -> jersey number, bound only when every read on the track
-    agrees (mirrors the identity layer's conflict guard)."""
-    seen: dict[int, set[str]] = {}
+    """track_id -> display label: confirmed numbers plain ("15"), single
+    unconfirmed reads marked provisional ("1?"), conflicts unlabeled."""
+    from .numbers import merge_reads
+
+    seen: dict[int, list[str]] = {}
     for fo in frames:
         for read in fo.ocr:
             digits = "".join(c for c in read.text if c.isdigit())
             if digits:
-                seen.setdefault(read.track_id, set()).add(digits)
-    return {tid: nums.pop() for tid, nums in seen.items() if len(nums) == 1}
+                seen.setdefault(read.track_id, []).append(digits)
+    out: dict[int, str] = {}
+    for tid, reads in seen.items():
+        value, ok = merge_reads(reads)
+        if value is not None:
+            out[tid] = value if ok else value + "?"
+    return out
 
 
 def _draw_players(

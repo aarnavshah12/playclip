@@ -43,15 +43,31 @@ class CountingReader:
         return result
 
 
-def test_binds_on_first_success_then_stops(tiny_video):
+def test_locks_after_two_agreeing_reads(tiny_video):
     # 20 samples span 3.8s -> attempts scheduled at ~t=0,1,2,3 (1 Hz)
-    reader = CountingReader([None, None, ("24", 0.9), ("99", 0.9)])
+    reader = CountingReader([None, ("24", 0.9), ("24", 0.85), ("99", 0.9)])
     frames = track_frames(n=20)
     enriched, bound = bind_numbers(frames, tiny_video, CFG, reader)
     assert bound == {5: "24"}
-    assert reader.calls == 3            # stopped right after the success
+    assert reader.calls == 3            # confirmed on 2nd agreeing read, stopped
     reads = [r for f in enriched for r in f.ocr]
-    assert reads == [OcrRead(track_id=5, text="24", confidence=0.9)]
+    assert [r.text for r in reads] == ["24", "24"]
+
+
+def test_partial_read_upgrades_to_full_number(tiny_video):
+    # the "#1 on a 15 shirt" bug: "1" then "15" agree -> confirmed "15"
+    reader = CountingReader([("1", 0.6), ("15", 0.7), ("99", 0.9)])
+    frames = track_frames(n=20)
+    _, bound = bind_numbers(frames, tiny_video, CFG, reader)
+    assert bound == {5: "15"}
+    assert reader.calls == 2
+
+
+def test_conflicting_reads_never_lock(tiny_video):
+    reader = CountingReader([("11", 0.9), ("7", 0.9)])
+    frames = track_frames(n=10)          # only 2 attempts fit
+    _, bound = bind_numbers(frames, tiny_video, CFG, reader)
+    assert bound == {}                   # wrong lock is worse than no label
 
 
 def test_attempts_capped(tiny_video):
@@ -71,21 +87,21 @@ def test_attempt_spacing_respects_hz(tiny_video):
 
 
 def test_reentry_gets_fresh_attempts(tiny_video):
-    reader = CountingReader([("24", 0.8)])
-    frames = track_frames(tid=5, n=3) + track_frames(tid=9, n=3, start=5)
+    reader = CountingReader([("24", 0.8)])   # every call reads "24"
+    frames = track_frames(tid=5, n=8) + track_frames(tid=9, n=8, start=10)
     enriched, bound = bind_numbers(frames, tiny_video, CFG, reader)
     assert bound == {5: "24", 9: "24"}  # same kid re-entering = new track = re-read
-    assert reader.calls == 2
+    assert reader.calls == 4            # 2 confirming reads per track
 
 
-def test_prebound_tracks_skip_reader(tiny_video):
+def test_preconfirmed_tracks_skip_reader(tiny_video):
     reader = CountingReader([("7", 0.9)])
     frames = track_frames(n=4)
     frames[0] = make_frame(0, [player(5, 60, 60, h=100)],
-                           ocr=[OcrRead(5, "24", 0.9)])
+                           ocr=[OcrRead(5, "24", 0.9), OcrRead(5, "24", 0.8)])
     enriched, bound = bind_numbers(frames, tiny_video, CFG, reader)
     assert bound == {5: "24"}
-    assert reader.calls == 0
+    assert reader.calls == 0            # two agreeing existing reads = confirmed
 
 
 def test_assemble_number_picks_central_cluster():

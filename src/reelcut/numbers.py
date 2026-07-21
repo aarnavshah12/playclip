@@ -89,15 +89,42 @@ def make_digit_reader(
     return read
 
 
-def _prebound(frames: list[FrameObservation]) -> dict[int, str]:
-    """Tracks already bound by existing reads (all non-empty reads agree)."""
-    seen: dict[int, set[str]] = defaultdict(set)
+def merge_reads(reads: list[str]) -> tuple[str | None, bool]:
+    """Reconcile a track's reads -> (value, confirmed).
+
+    Two reads agree when one is a substring of the other (a "1" off a "15"
+    shirt is a partial read of the same number); the agreed value is the
+    longest. Returns (majority value, True) once >= 2 reads agree, a single
+    read as (value, False) — provisional, keep attempting — and (None, False)
+    for unresolved conflicts, because a wrong lock is worse than no label.
+    """
+    if not reads:
+        return None, False
+    groups: list[list[str]] = []
+    for read in reads:
+        for g in groups:
+            if all(read in v or v in read for v in g):
+                g.append(read)
+                break
+        else:
+            groups.append([read])
+    groups.sort(key=len, reverse=True)
+    best = groups[0]
+    if len(best) >= 2 and (len(groups) == 1 or len(best) > len(groups[1])):
+        return max(best, key=len), True
+    if len(groups) == 1 and len(best) == 1:
+        return best[0], False
+    return None, False
+
+
+def _existing_reads(frames: list[FrameObservation]) -> dict[int, list[str]]:
+    seen: dict[int, list[str]] = defaultdict(list)
     for f in frames:
         for r in f.ocr:
             digits = "".join(c for c in r.text if c.isdigit())
             if digits:
-                seen[r.track_id].add(digits)
-    return {tid: nums.copy().pop() for tid, nums in seen.items() if len(nums) == 1}
+                seen[r.track_id].append(digits)
+    return seen
 
 
 def bind_numbers(
@@ -117,7 +144,10 @@ def bind_numbers(
     """
     import cv2
 
-    bound: dict[int, str] = _prebound(frames)
+    pools: dict[int, list[str]] = _existing_reads(frames)
+    confirmed: set[int] = {
+        tid for tid, reads in pools.items() if merge_reads(reads)[1]
+    }
     min_gap_s = 1.0 / max(cfg.number_attempt_hz, 1e-6)
 
     # attempt plan: frame_index -> [(track_id, bbox)]
@@ -127,7 +157,7 @@ def bind_numbers(
     for f in frames:
         for p in f.players:
             tid = p.track_id
-            if tid in bound:
+            if tid in confirmed:
                 continue
             if attempts_left.get(tid, cfg.number_max_attempts) <= 0:
                 continue
@@ -151,7 +181,7 @@ def bind_numbers(
                 if src_idx == pending[pi]:
                     fh, fw = img.shape[:2]
                     for tid, bbox in plan[src_idx]:
-                        if tid in bound:      # bound earlier in this same pass
+                        if tid in confirmed:  # confirmed earlier in this pass
                             continue
                         mx, my = bbox.w * _CROP_MARGIN, bbox.h * _CROP_MARGIN
                         x0 = max(0, int(bbox.x - mx)); y0 = max(0, int(bbox.y - my))
@@ -161,14 +191,23 @@ def bind_numbers(
                         result = reader(img[y0:y1, x0:x1])
                         if result is not None and result[0]:
                             number, conf = result
-                            bound[tid] = number
+                            pools[tid].append(number)
                             new_reads[src_idx].append(
                                 OcrRead(track_id=tid, text=number, confidence=conf)
                             )
+                            if merge_reads(pools[tid])[1]:
+                                confirmed.add(tid)   # two agreeing reads: lock
                     pi += 1
                 src_idx += 1
         finally:
             cap.release()
+
+    bound = {
+        tid: value
+        for tid, reads in pools.items()
+        for value, _ok in [merge_reads(reads)]
+        if value is not None
+    }
 
     if not new_reads:
         return list(frames), bound
